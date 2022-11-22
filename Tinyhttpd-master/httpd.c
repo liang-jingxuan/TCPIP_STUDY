@@ -34,18 +34,27 @@
 #define STDOUT  1
 #define STDERR  2
 
+int startup(u_short *);//初始化服务器SOCKET
 void accept_request(void *);
-void bad_request(int);
-void cat(int, FILE *);
-void cannot_execute(int);
+
+void bad_request(int);//400 bad request
+void cannot_execute(int);//500 错误，
 void error_die(const char *);
-void execute_cgi(int, const char *, const char *, const char *);
-int get_line(int, char *, int);
-void headers(int, const char *);
-void not_found(int);
+void not_found(int);//404 not found 找不到请求的文件
+void unimplemented(int);//不明指令
+
+int get_line(int, char *, int);//以换行或回车符为结束符，读入一行字符串
+
+//HTTP请求报文
+//  读取socket缓存区中的HTTP请求报文，（虽然可能用不上，不读取socket中数据的话，就会一直占据缓存）
+//  读取后socket缓存区后，调用headers和cat发送HTTP响应报文
 void serve_file(int, const char *);
-int startup(u_short *);
-void unimplemented(int);
+
+//HTTP响应报文：
+void headers(int, const char *);//向客户端发送HTTP响应报文的报头，如：HTTP/1.1 OK 200
+void cat(int, FILE *);//向客户端发送用户请求的文件
+void execute_cgi(int, const char *, const char *, const char *);
+
 
 /**********************************************************************/
 /* A request has caused a call to accept() on the server port to
@@ -176,7 +185,7 @@ void bad_request(int client)
  * Parameters: the client socket descriptor
  *             FILE pointer for the file to cat */
 /**********************************************************************/
-void cat(int client, FILE *resource)
+void cat(int client, FILE *resource)//向客户端发送响应报文的正文
 {
     printf("响应报文的正文*****************************\n");
     char buf[1024];
@@ -237,17 +246,21 @@ void execute_cgi(int client, const char *path,
     int i;
     char c;
     int numchars = 1;
-    int content_length = -1;
+    int content_length = -1;//服务器响应的对象的长度
 
     buf[0] = 'A'; buf[1] = '\0';
-    if (strcasecmp(method, "GET") == 0)
-        while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
+    if (strcasecmp(method, "GET") == 0){/*GET方法*/
+        while ((numchars > 0) && strcmp("\n", buf)){  /* read & discard headers */
             numchars = get_line(client, buf, sizeof(buf));
-    else if (strcasecmp(method, "POST") == 0) /*POST*/
+            printf("请求报文正文：%s",buf);
+        }
+    }
+    else if (strcasecmp(method, "POST") == 0) /*POST方法*/
     {
         numchars = get_line(client, buf, sizeof(buf));
         while ((numchars > 0) && strcmp("\n", buf))
         {
+            printf("请求报文正文：%s",buf);
             buf[15] = '\0';
             if (strcasecmp(buf, "Content-Length:") == 0)
                 content_length = atoi(&(buf[16]));
@@ -262,9 +275,9 @@ void execute_cgi(int client, const char *path,
     {
     }
 
-
-    if (pipe(cgi_output) < 0) {
-        cannot_execute(client);
+    /*需要一对管道和新进程完成CGI程序*/
+    if (pipe(cgi_output) < 0) {//创建管道，创建失败则返回负值
+        cannot_execute(client);//管道创建失败，向用户发送状态码500
         return;
     }
     if (pipe(cgi_input) < 0) {
@@ -272,24 +285,31 @@ void execute_cgi(int client, const char *path,
         return;
     }
 
-    if ( (pid = fork()) < 0 ) {
+    //这里为什么要用多进程？
+    if ( (pid = fork()) < 0 ) {//fork输出负值表示创建进程失败
         cannot_execute(client);
         return;
     }
+    /*管道和新进程创建成功*/
     sprintf(buf, "HTTP/1.0 200 OK\r\n");
     send(client, buf, strlen(buf), 0);
-    if (pid == 0)  /* child: CGI script */
+    //fork函数子进程获得非0的pid值；父进程的pid为0
+    if (pid == 0)  /* child: CGI script 子进程*/
     {
         char meth_env[255];
         char query_env[255];
         char length_env[255];
-
+        printf("In parent proccess.\n");
         dup2(cgi_output[1], STDOUT);
+        //dup2(旧描述符，新描述符)描述符重定向
         dup2(cgi_input[0], STDIN);
+
+        //使输入和输出管道分离
         close(cgi_output[0]);
         close(cgi_input[1]);
         sprintf(meth_env, "REQUEST_METHOD=%s", method);
-        putenv(meth_env);
+        //printf("%s\n",meth_env);
+        putenv(meth_env);//putenv()用来改变或增加环境变量的内容
         if (strcasecmp(method, "GET") == 0) {
             sprintf(query_env, "QUERY_STRING=%s", query_string);
             putenv(query_env);
@@ -300,16 +320,18 @@ void execute_cgi(int client, const char *path,
         }
         execl(path, NULL);
         exit(0);
-    } else {    /* parent */
+    } else {    /* parent 父进程*/
         close(cgi_output[1]);
         close(cgi_input[0]);
-        if (strcasecmp(method, "POST") == 0)
+        if (strcasecmp(method, "POST") == 0){
             for (i = 0; i < content_length; i++) {
                 recv(client, &c, 1, 0);
-                write(cgi_input[1], &c, 1);
+                write(cgi_input[1], &c, 1);//将POST后面的能容写进管道
             }
-        while (read(cgi_output[0], &c, 1) > 0)
+        }
+        while (read(cgi_output[0], &c, 1) > 0){
             send(client, &c, 1, 0);
+        }
 
         close(cgi_output[0]);
         close(cgi_input[1]);
